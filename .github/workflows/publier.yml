@@ -1,0 +1,57 @@
+# Publie une version de Violet Password : à chaque push sur main qui ajoute versions/<version>/latest.json,
+# crée la release v<version> avec les fichiers de ce dossier (installateur signé, .sig, latest.json) et la marque
+# « Latest ». L'application lit releases/latest/download/latest.json.
+#
+# La signature est faite AVANT, hors de GitHub (scripts/publish-release.mjs du code privé) : ce workflow ne voit
+# jamais la clé privée et ne peut rien signer. Un fichier mal signé serait refusé par l'application.
+name: Publier une version
+
+on:
+  push:
+    branches: [main]
+    paths: ['versions/*/latest.json']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publier
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 2
+      - name: Créer les releases des nouvelles versions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            changed=$(git diff --name-only "$BEFORE" HEAD -- 'versions/*/latest.json')
+          else
+            changed=$(git ls-files 'versions/*/latest.json')
+          fi
+          for manifest in $changed; do
+            [ -f "$manifest" ] || continue
+            dir=$(dirname "$manifest")
+            version=$(basename "$dir")
+            declared=$(jq -r .version "$manifest")
+            if [ "$declared" != "$version" ]; then
+              echo "::error::$manifest annonce $declared, dossier $version"; exit 1
+            fi
+            if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::version invalide : $version"; exit 1
+            fi
+            tag="v$version"
+            if gh release view "$tag" >/dev/null 2>&1; then
+              echo "$tag existe déjà : rien à faire"; continue
+            fi
+            jq -r '.notes // ""' "$manifest" > notes.txt
+            gh release create "$tag" "$dir"/* --target "$GITHUB_SHA" --title "Violet Password $version" --notes-file notes.txt --latest
+            echo "Release $tag publiée"
+          done
